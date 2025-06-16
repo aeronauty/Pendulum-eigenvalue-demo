@@ -1,4 +1,3 @@
-// App.tsx
 import { useEffect, useRef, useState } from 'react';
 
 interface State {
@@ -16,6 +15,8 @@ interface Settings {
   L2: number;
   g: number;
   damping: number;
+  k1: number;
+  k2: number;
 }
 
 type DragTarget = 'm1' | 'm2' | null;
@@ -36,11 +37,15 @@ export default function App() {
     L1: 100,
     L2: 50,
     g: 9.81,
-    damping: 0.01
+    damping: 0.01,
+    k1: 0,
+    k2: 0
   });
 
   const settingsRef = useRef(settings);
-  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   const dragTargetRef = useRef<DragTarget>(null);
 
@@ -107,9 +112,9 @@ export default function App() {
     };
 
     const drawFrame = (currentTime: number) => {
-      const { speed, m1, m2, L1, L2, g, damping } = settingsRef.current;
-      const fixedDt = 1 / 20;
-      const dt = fixedDt * settingsRef.current.speed;
+      const { speed, m1, m2, L1, L2, g, damping, k1, k2 } = settingsRef.current;
+      const fixedDt = 1 / 10;
+      const dt = fixedDt * speed;
       lastTime = currentTime;
 
       if (!dragTargetRef.current) {
@@ -123,6 +128,7 @@ export default function App() {
           - 2 * Math.sin(delta) * m2 * (
             dtheta2 ** 2 * L2 + dtheta1 ** 2 * L1 * Math.cos(delta)
           )
+          - k1 * theta1
         ) / (L1 * denom);
 
         const ddtheta2 = (
@@ -131,6 +137,7 @@ export default function App() {
             + g * (m1 + m2) * Math.cos(theta1)
             + dtheta2 ** 2 * L2 * m2 * Math.cos(delta)
           )
+          - k2 * (theta2 - theta1)
         ) / (L2 * denom);
 
         stateRef.current.dtheta1 += (ddtheta1 - damping * dtheta1) * dt;
@@ -205,16 +212,29 @@ export default function App() {
       {slider('Length 2', 'L2', 10, 200)}
       {slider('Gravity', 'g', 0.1, 20, 0.1)}
       {slider('Damping', 'damping', -1, 1, 0.01)}
-      <button onClick={() => {
-        stateRef.current = {
-          theta1: Math.PI / 2,
-          theta2: Math.PI / 4,
-          dtheta1: 0,
-          dtheta2: 0
-        };
-      }}>
-        Reset
-      </button>
+      {slider('Stiffness θ₁', 'k1', -10000, 10000, 1)}
+      {slider('Stiffness θ₂', 'k2', -10000, 10000, 1)}
+      <div style={{ marginBottom: '1em' }}>
+        <button onClick={() => {
+          stateRef.current = {
+            theta1: Math.PI / 2,
+            theta2: Math.PI / 4,
+            dtheta1: 0,
+            dtheta2: 0
+          };
+        }}>
+          Reset Angles
+        </button>
+        <button onClick={() => updateSetting('damping', 0)} style={{ marginLeft: '1em' }}>
+          Zero Damping
+        </button>
+        <button onClick={() => updateSetting('k1', 0)} style={{ marginLeft: '1em' }}>
+          Zero Stiffness θ₁
+        </button>
+        <button onClick={() => updateSetting('k2', 0)} style={{ marginLeft: '1em' }}>
+          Zero Stiffness θ₂
+        </button>
+      </div>
       <canvas
         ref={canvasRef}
         width={600}
