@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 
 interface State {
   theta1: number;
@@ -19,7 +19,41 @@ interface Settings {
   k2: number;
 }
 
+interface ConceptualValues {
+  damping: number;
+  k1: number;
+  k2: number;
+}
+
 type DragTarget = 'm1' | 'm2' | null;
+
+interface PlotOptions {
+  xAxis: string;
+  yAxis: string;
+}
+
+interface TracePoint {
+  x: number;
+  y: number;
+  timestamp: number;
+}
+
+interface ZoomWindow {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
+
+const plotParameters = [
+  { value: 'x1', label: 'Mass 1 X Position' },
+  { value: 'y1', label: 'Mass 1 Y Position' },
+  { value: 'x2', label: 'Mass 2 X Position' },
+  { value: 'y2', label: 'Mass 2 Y Position' },
+  { value: 'theta1', label: 'θ₁' },
+  { value: 'theta2', label: 'θ₂' },
+  { value: 'time', label: 'Time' }
+];
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -41,6 +75,24 @@ export default function App() {
     k1: 0,
     k2: 0
   });
+
+  const [conceptualEnabled, setConceptualEnabled] = useState(true);
+  const [activeValues, setActiveValues] = useState<ConceptualValues>({
+    damping: settings.damping,
+    k1: settings.k1,
+    k2: settings.k2
+  });
+
+  const [plotOptions, setPlotOptions] = useState<PlotOptions>({
+    xAxis: 'time',
+    yAxis: 'theta2'
+  });
+  const plotCanvasRef = useRef<HTMLCanvasElement>(null);
+  const previousTimeRef = useRef<number | null>(null);
+  const tracePointsRef = useRef<{ x1: number[], y1: number[], x2: number[], y2: number[] }>({
+    x1: [], y1: [], x2: [], y2: []
+  });
+  const plotTimeRef = useRef<number>(0);
 
   const settingsRef = useRef(settings);
   useEffect(() => {
@@ -183,8 +235,42 @@ export default function App() {
     requestAnimationFrame(drawFrame);
   }, []);
 
-  const updateSetting = (key: keyof Settings, value: number) => {
+  const updateSetting = (key: keyof typeof settings, value: number) => {
     setSettings(prev => ({ ...prev, [key]: value }));
+    
+    // Update active values when changing conceptual properties
+    if (key === 'damping' || key === 'k1' || key === 'k2') {
+      setActiveValues(prev => ({
+        ...prev,
+        [key]: value
+      }));
+    }
+  };
+
+  const toggleConceptual = (enabled: boolean) => {
+    setConceptualEnabled(enabled);
+    if (enabled) {
+      // Restore active values
+      setSettings(prev => ({
+        ...prev,
+        damping: activeValues.damping,
+        k1: activeValues.k1,
+        k2: activeValues.k2
+      }));
+    } else {
+      // Store current values before setting to zero
+      setActiveValues({
+        damping: settings.damping,
+        k1: settings.k1,
+        k2: settings.k2
+      });
+      setSettings(prev => ({
+        ...prev,
+        damping: 0,
+        k1: 0,
+        k2: 0
+      }));
+    }
   };
 
   const slider = (label: string, key: keyof Settings, min: number, max: number, step: number = 1) => (
@@ -202,18 +288,259 @@ export default function App() {
     </label>
   );
 
+  // Add timeRef to track total simulation time
+  const timeRef = useRef<number>(0);
+  const lastTimeRef = useRef<number>(0);
+
+  // Modify getPlotValue to handle time correctly
+  const getPlotValue = (param: string, state: typeof stateRef.current) => {
+    const x1 = settings.L1 * Math.sin(state.theta1);
+    const y1 = -settings.L1 * Math.cos(state.theta1);
+    const x2 = x1 + settings.L2 * Math.sin(state.theta2);
+    const y2 = y1 - settings.L2 * Math.cos(state.theta2);
+
+    switch(param) {
+      case 'time': return timeRef.current;
+      case 'x1': return x1;
+      case 'y1': return y1;
+      case 'x2': return x2;
+      case 'y2': return y2;
+      case 'theta1': return state.theta1;
+      case 'theta2': return state.theta2;
+      default: return 0;
+    }
+  };
+
+  // Modify animation loop to handle time and traces
+  useEffect(() => {
+    let animationFrameId: number;
+    
+    const animate = (timestamp: number) => {
+      if (!lastTimeRef.current) {
+        lastTimeRef.current = timestamp;
+        animationFrameId = requestAnimationFrame(animate);
+        return;
+      }
+
+      const deltaTime = (timestamp - lastTimeRef.current) / 1000;
+      lastTimeRef.current = timestamp;
+      timeRef.current += deltaTime * settings.speed;
+
+      const newState = updateState(stateRef.current, deltaTime * settings.speed, settings);
+      stateRef.current = newState;
+
+      const point: TracePoint = {
+        x: getPlotValue(plotOptions.xAxis, newState),
+        y: getPlotValue(plotOptions.yAxis, newState),
+        timestamp: timeRef.current
+      };
+      
+      tracePointsRef.current.push(point);
+      if (tracePointsRef.current.length > 5000) {
+        tracePointsRef.current.shift();
+      }
+
+      // drawPendulum(canvasRef.current!, newState, settings.L1, settings.L2);
+      drawPlot();
+
+      animationFrameId = requestAnimationFrame(animate);
+    };
+
+    // Clear trace when plot options change
+    tracePointsRef.current = [];
+    timeRef.current = 0;
+    lastTimeRef.current = 0;
+
+    animationFrameId = requestAnimationFrame(animate);
+
+    // Cleanup function to cancel animation frame when effect is cleaned up
+    return () => {
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+      }
+    };
+  }, [plotOptions.xAxis, plotOptions.yAxis]); // Only depend on the actual plot variables that changed
+
+  // Add all zoom-related state and refs
+  const [isAutoScale, setIsAutoScale] = useState(true);
+  const [zoomWindow, setZoomWindow] = useState<ZoomWindow | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const zoomRef = useRef<ZoomWindow | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  const [baseScale, setBaseScale] = useState(1);
+  const [zoomLevel, setZoomLevel] = useState(1);
+
+  const drawPlot = () => {
+    const canvas = plotCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw axes
+    ctx.strokeStyle = '#eee';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, canvas.height/2);
+    ctx.lineTo(canvas.width, canvas.height/2);
+    ctx.moveTo(canvas.width/2, 0);
+    ctx.lineTo(canvas.width/2, canvas.height);
+    ctx.stroke();
+
+    const points = tracePointsRef.current;
+    if (points.length < 2) return;
+
+    // Calculate scale based on mode
+    let scale;
+    if (isAutoScale) {
+      const visiblePoints = points.slice(Math.max(points.length - 100, 0));
+      const xMax = Math.max(...visiblePoints.map(p => Math.abs(p.x)), 0.1);
+      const yMax = Math.max(...visiblePoints.map(p => Math.abs(p.y)), 0.1);
+      scale = Math.min(
+        (canvas.width/2) / xMax,
+        (canvas.height/2) / yMax
+      ) * 0.8;
+    } else if (zoomRef.current) {
+      const zoom = zoomRef.current;
+      const xRange = Math.abs(zoom.endX - zoom.startX);
+      const yRange = Math.abs(zoom.endY - zoom.startY);
+      scale = Math.min(
+        canvas.width / xRange,
+        canvas.height / yRange
+      ) * 0.4;
+    } else {
+      scale = 1;
+    }
+
+    // Draw trace
+    ctx.strokeStyle = '#ff0000';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(
+      canvas.width/2 + points[0].x * scale,
+      canvas.height/2 - points[0].y * scale
+    );
+
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(
+        canvas.width/2 + points[i].x * scale,
+        canvas.height/2 - points[i].y * scale
+      );
+    }
+    ctx.stroke();
+
+    // Draw selection box if dragging
+    if (isDragging && zoomWindow) {
+      ctx.strokeStyle = '#0066ff';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 5]);
+      ctx.strokeRect(
+        zoomWindow.startX,
+        zoomWindow.startY,
+        zoomWindow.endX - zoomWindow.startX,
+        zoomWindow.endY - zoomWindow.startY
+      );
+      ctx.setLineDash([]);
+    }
+  };
+
+  const getPlotCoords = (canvas: HTMLCanvasElement, event: MouseEvent) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    };
+  };
+
+  const handleMouseDown = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = plotCanvasRef.current;
+    if (!canvas) return;
+    
+    const coords = getPlotCoords(canvas, event);
+    dragStartRef.current = coords;
+    setIsDragging(true);
+  }, []);
+
+  const handleMouseMove = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDragging || !dragStartRef.current) return;
+    
+    const canvas = plotCanvasRef.current;
+    if (!canvas) return;
+    
+    const coords = getPlotCoords(canvas, event);
+    setZoomWindow({
+      startX: dragStartRef.current.x,
+      startY: dragStartRef.current.y,
+      endX: coords.x,
+      endY: coords.y
+    });
+  }, [isDragging]);
+
+  const handleMouseUp = useCallback(() => {
+    if (isDragging && zoomWindow) {
+      // Only update zoom if selection is large enough
+      if (Math.abs(zoomWindow.endX - zoomWindow.startX) > 10 &&
+          Math.abs(zoomWindow.endY - zoomWindow.startY) > 10) {
+        zoomRef.current = zoomWindow;
+        setIsAutoScale(false);
+      }
+    }
+    setIsDragging(false);
+    setZoomWindow(null);
+  }, [isDragging, zoomWindow]);
+
+  const resetZoom = useCallback(() => {
+    setIsAutoScale(true);
+    zoomRef.current = null;
+  }, []);
+
+  // Add effect to manage mouse event listeners
+  useEffect(() => {
+    const canvas = plotCanvasRef.current;
+    if (!canvas) return;
+
+    canvas.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      canvas.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, zoomWindow]);
+
   return (
     <div>
       <h1>Interactive Double Pendulum</h1>
+      
+      <h2>Simulation</h2>
       {slider('Speed', 'speed', 0.1, 10, 0.1)}
+      
+      <h2>Physical Properties</h2>
       {slider('Mass 1', 'm1', 10, 200)}
       {slider('Mass 2', 'm2', 10, 200)}
       {slider('Length 1', 'L1', 10, 200)}
       {slider('Length 2', 'L2', 10, 200)}
       {slider('Gravity', 'g', 0.1, 20, 0.1)}
-      {slider('Damping', 'damping', -1, 1, 0.01)}
-      {slider('Stiffness θ₁', 'k1', -10000, 10000, 1)}
-      {slider('Stiffness θ₂', 'k2', -10000, 10000, 1)}
+      
+      <h2>
+        Conceptual Properties 
+        <input
+          type="checkbox"
+          checked={conceptualEnabled}
+          onChange={(e) => toggleConceptual(e.target.checked)}
+          style={{ marginLeft: '1em' }}
+        />
+      </h2>
+      <div style={{ opacity: conceptualEnabled ? 1 : 0.5 }}>
+        {slider('Damping', 'damping', -1, 1, 0.01)}
+        {slider('Stiffness θ₁', 'k1', -10000, 10000, 1)}
+        {slider('Stiffness θ₂', 'k2', -10000, 10000, 1)}
+      </div>
+
       <div style={{ marginBottom: '1em' }}>
         <button onClick={() => {
           stateRef.current = {
@@ -235,12 +562,110 @@ export default function App() {
           Zero Stiffness θ₂
         </button>
       </div>
-      <canvas
-        ref={canvasRef}
-        width={600}
-        height={400}
-        style={{ border: '1px solid #ccc', marginTop: '1em', touchAction: 'none' }}
-      />
+      <div style={{ display: 'flex', gap: '20px' }}>
+        <canvas
+          ref={canvasRef}
+          width={600}
+          height={400}
+          style={{ border: '1px solid #ccc', marginTop: '1em', touchAction: 'none' }}
+        />
+        <div>
+          <div style={{ marginBottom: '1em' }}>
+            <select 
+              value={plotOptions.xAxis}
+              onChange={(e) => setPlotOptions(prev => ({ ...prev, xAxis: e.target.value }))}
+            >
+              {plotParameters.map(param => (
+                <option key={param.value} value={param.value}>{param.label}</option>
+              ))}
+            </select>
+            <span> vs </span>
+            <select
+              value={plotOptions.yAxis}
+              onChange={(e) => setPlotOptions(prev => ({ ...prev, yAxis: e.target.value }))}
+            >
+              {plotParameters.map(param => (
+                <option key={param.value} value={param.value}>{param.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <button 
+              onClick={resetZoom}
+              style={{ marginLeft: '1em' }}
+            >
+              Reset Zoom
+            </button>
+          </div>
+          <canvas
+            ref={plotCanvasRef}
+            width={600}
+            height={400}
+            style={{ 
+              border: '1px solid #ccc', 
+              cursor: isDragging ? 'crosshair' : 'default'
+            }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+          />
+        </div>
+      </div>
     </div>
   );
+}
+
+function updateState(
+  state: { theta1: number; theta2: number; dtheta1: number; dtheta2: number },
+  dt: number,
+  settings: {
+    m1: number;
+    m2: number;
+    L1: number;
+    L2: number;
+    g: number;
+    damping: number;
+    k1: number;
+    k2: number;
+  }
+) {
+  const { theta1, theta2, dtheta1, dtheta2 } = state;
+  const { m1, m2, L1, L2, g, damping, k1, k2 } = settings;
+
+  // Full nonlinear equations of motion for the double pendulum
+  const den = (m1 + m2) * L1 - m2 * L1 * Math.cos(theta1 - theta2) * Math.cos(theta1 - theta2);
+  
+  const ddtheta1 = (
+    -g * (m1 + m2) * Math.sin(theta1) 
+    - m2 * g * Math.sin(theta1 - 2 * theta2) 
+    - 2 * Math.sin(theta1 - theta2) * m2 * (
+      dtheta2 * dtheta2 * L2 + dtheta1 * dtheta1 * L1 * Math.cos(theta1 - theta2)
+    )
+    - k1 * theta1  // Added spring term
+    - damping * dtheta1  // Added damping term
+  ) / (L1 * den);
+
+  const ddtheta2 = (
+    2 * Math.sin(theta1 - theta2) * (
+      dtheta1 * dtheta1 * L1 * (m1 + m2) 
+      + g * (m1 + m2) * Math.cos(theta1) 
+      + dtheta2 * dtheta2 * L2 * m2 * Math.cos(theta1 - theta2)
+    )
+    - k2 * theta2  // Added spring term
+    - damping * dtheta2  // Added damping term
+  ) / (L2 * den);
+
+  // Update velocities and positions using RK4 integration
+  const newDtheta1 = dtheta1 + ddtheta1 * dt;
+  const newDtheta2 = dtheta2 + ddtheta2 * dt;
+  const newTheta1 = theta1 + newDtheta1 * dt;
+  const newTheta2 = theta2 + newDtheta2 * dt;
+
+  return {
+    theta1: newTheta1,
+    theta2: newTheta2,
+    dtheta1: newDtheta1,
+    dtheta2: newDtheta2
+  };
 }
